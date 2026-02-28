@@ -13,6 +13,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
+// defaultContextWindow is the fallback input context size when context_window
+// is not configured. 128k is broadly supported across modern frontier models.
+const defaultContextWindow = 128 * 1024 // 131072 tokens
+
 // AgentInstance represents a fully configured agent with its own workspace,
 // session manager, context builder, and tool registry.
 type AgentInstance struct {
@@ -88,6 +92,11 @@ func NewAgentInstance(
 		maxTokens = 8192
 	}
 
+	contextWindow := defaults.ContextWindow
+	if contextWindow == 0 {
+		contextWindow = defaultContextWindow
+	}
+
 	temperature := 0.7
 	if defaults.Temperature != nil {
 		temperature = *defaults.Temperature
@@ -149,7 +158,7 @@ func NewAgentInstance(
 		MaxIterations:  maxIter,
 		MaxTokens:      maxTokens,
 		Temperature:    temperature,
-		ContextWindow:  maxTokens,
+		ContextWindow:  contextWindow,
 		Provider:       provider,
 		Sessions:       sessionsManager,
 		ContextBuilder: contextBuilder,
