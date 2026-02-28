@@ -94,6 +94,65 @@ func TestNewAgentInstance_DefaultsTemperatureWhenUnset(t *testing.T) {
 	}
 }
 
+func TestNewAgentInstance_ContextWindowConfiguredIndependently(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-instance-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         65536,
+				ContextWindow:     200000,
+				MaxToolIterations: 5,
+			},
+		},
+	}
+
+	provider := &mockProvider{}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
+
+	if agent.MaxTokens != 65536 {
+		t.Fatalf("MaxTokens = %d, want %d", agent.MaxTokens, 65536)
+	}
+	if agent.ContextWindow != 200000 {
+		t.Fatalf("ContextWindow = %d, want %d", agent.ContextWindow, 200000)
+	}
+}
+
+func TestNewAgentInstance_ContextWindowDefaultsToConstantNotMaxTokens(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-instance-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         8192,
+				MaxToolIterations: 5,
+			},
+		},
+	}
+
+	provider := &mockProvider{}
+	agent := NewAgentInstance(nil, &cfg.Agents.Defaults, cfg, provider)
+
+	if agent.ContextWindow == agent.MaxTokens {
+		t.Fatalf("ContextWindow (%d) must not equal MaxTokens (%d)", agent.ContextWindow, agent.MaxTokens)
+	}
+	if agent.ContextWindow != defaultContextWindow {
+		t.Fatalf("ContextWindow = %d, want defaultContextWindow (%d)", agent.ContextWindow, defaultContextWindow)
+	}
+}
+
 func TestNewAgentInstance_ResolveCandidatesFromModelListAlias(t *testing.T) {
 	tests := []struct {
 		name         string
