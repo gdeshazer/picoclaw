@@ -21,6 +21,9 @@ type State struct {
 	// LastChatID is the last chat ID used for communication
 	LastChatID string `json:"last_chat_id,omitempty"`
 
+	// SessionOverrides maps senderID -> sessionKey for per-user active session overrides
+	SessionOverrides map[string]string `json:"session_overrides,omitempty"`
+
 	// Timestamp is the last time this state was updated
 	Timestamp time.Time `json:"timestamp"`
 }
@@ -127,6 +130,49 @@ func (sm *Manager) GetTimestamp() time.Time {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 	return sm.state.Timestamp
+}
+
+// SetSessionOverride sets a session key override for the given senderID and persists state.
+func (sm *Manager) SetSessionOverride(senderID, sessionKey string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if sm.state.SessionOverrides == nil {
+		sm.state.SessionOverrides = make(map[string]string)
+	}
+	sm.state.SessionOverrides[senderID] = sessionKey
+	sm.state.Timestamp = time.Now()
+
+	if err := sm.saveAtomic(); err != nil {
+		return fmt.Errorf("failed to save state atomically: %w", err)
+	}
+	return nil
+}
+
+// GetSessionOverride returns the active session key override for the given senderID, or "" if none.
+func (sm *Manager) GetSessionOverride(senderID string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if sm.state.SessionOverrides == nil {
+		return ""
+	}
+	return sm.state.SessionOverrides[senderID]
+}
+
+// ClearSessionOverride removes any session key override for the given senderID and persists state.
+func (sm *Manager) ClearSessionOverride(senderID string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if sm.state.SessionOverrides != nil {
+		delete(sm.state.SessionOverrides, senderID)
+	}
+	sm.state.Timestamp = time.Now()
+
+	if err := sm.saveAtomic(); err != nil {
+		return fmt.Errorf("failed to save state atomically: %w", err)
+	}
+	return nil
 }
 
 // saveAtomic performs an atomic save using temp file + rename.

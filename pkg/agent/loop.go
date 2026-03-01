@@ -585,6 +585,11 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		sessionKey = msg.SessionKey
 	}
 
+	// Apply any user-specific session override
+	if override := al.state.GetSessionOverride(msg.SenderID); override != "" {
+		sessionKey = override
+	}
+
 	logger.InfoCF("agent", "Routed message",
 		map[string]any{
 			"agent_id":    agent.ID,
@@ -1518,6 +1523,9 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 			return fmt.Sprintf("Unknown list target: %s", args[0]), true
 		}
 
+	case "/session":
+		return al.handleSessionCommand(ctx, msg, args)
+
 	case "/switch":
 		if len(args) < 3 || args[1] != "to" {
 			return "Usage: /switch [model|channel] to <name>", true
@@ -1548,6 +1556,133 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 	}
 
 	return "", false
+}
+
+// sanitizeSessionLabel lowercases the label, replaces spaces with hyphens, and
+// removes any characters outside [a-z0-9-].
+func sanitizeSessionLabel(label string) string {
+	label = strings.ToLower(strings.TrimSpace(label))
+	label = strings.ReplaceAll(label, " ", "-")
+	var b strings.Builder
+	for _, r := range label {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func (al *AgentLoop) handleSessionCommand(ctx context.Context, msg bus.InboundMessage, args []string) (string, bool) {
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		return "No default agent configured", true
+	}
+
+	// Derive the auto-routed session key for this user.
+	route := al.registry.ResolveRoute(routing.RouteInput{
+		Channel:    msg.Channel,
+		AccountID:  msg.Metadata["account_id"],
+		Peer:       extractPeer(msg),
+		ParentPeer: extractParentPeer(msg),
+		GuildID:    msg.Metadata["guild_id"],
+		TeamID:     msg.Metadata["team_id"],
+	})
+	autoKey := route.SessionKey
+	override := al.state.GetSessionOverride(msg.SenderID)
+
+	activeKey := autoKey
+	if override != "" {
+		activeKey = override
+	}
+
+	if len(args) == 0 {
+		// /session — show current active session key
+		if override != "" {
+			return fmt.Sprintf("Active session: %s (override)", activeKey), true
+		}
+		return fmt.Sprintf("Active session: %s", activeKey), true
+	}
+
+	sub := args[0]
+	subArgs := args[1:]
+
+	switch sub {
+	case "list":
+		peerID := msg.SenderID
+		if len(subArgs) > 0 {
+			peerID = subArgs[0]
+		}
+		sessions := agent.Sessions.ListByPeer(peerID)
+		if len(sessions) == 0 {
+			return fmt.Sprintf("No sessions found for %s", peerID), true
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("Sessions for %s:\n", peerID))
+		for _, s := range sessions {
+			if s.Key == activeKey {
+				sb.WriteString(fmt.Sprintf("  [active] %s  (updated: %s)\n", s.Key, s.Updated.Format("2006-01-02")))
+			} else {
+				sb.WriteString(fmt.Sprintf("           %s  (updated: %s)\n", s.Key, s.Updated.Format("2006-01-02")))
+			}
+		}
+		return strings.TrimRight(sb.String(), "\n"), true
+
+	case "new":
+		var label string
+		if len(subArgs) > 0 {
+			label = sanitizeSessionLabel(strings.Join(subArgs, " "))
+		}
+		if label == "" {
+			label = time.Now().Format("20060102-150405")
+		}
+		newKey := fmt.Sprintf("%s:named:%s", autoKey, label)
+		agent.Sessions.GetOrCreate(newKey)
+		if err := al.state.SetSessionOverride(msg.SenderID, newKey); err != nil {
+			return fmt.Sprintf("Failed to set session override: %v", err), true
+		}
+		return fmt.Sprintf("Created and switched to session: %s", newKey), true
+
+	case "resume":
+		if len(subArgs) == 0 {
+			return "Usage: /session resume <key>", true
+		}
+		key := subArgs[0]
+		// Verify the session exists by checking if it has been loaded.
+		history := agent.Sessions.GetHistory(key)
+		summary := agent.Sessions.GetSummary(key)
+		if len(history) == 0 && summary == "" {
+			return fmt.Sprintf("Session not found: %s", key), true
+		}
+		if err := al.state.SetSessionOverride(msg.SenderID, key); err != nil {
+			return fmt.Sprintf("Failed to set session override: %v", err), true
+		}
+		return fmt.Sprintf("Switched to session: %s", key), true
+
+	case "delete":
+		if len(subArgs) == 0 {
+			return "Usage: /session delete <key>", true
+		}
+		key := subArgs[0]
+		wasActive := key == activeKey
+		if err := agent.Sessions.Delete(key); err != nil {
+			return fmt.Sprintf("Failed to delete session: %v", err), true
+		}
+		resp := fmt.Sprintf("Deleted session: %s", key)
+		if wasActive {
+			_ = al.state.ClearSessionOverride(msg.SenderID)
+			resp += "\nWarning: this was your active session. Switched back to automatic routing."
+		}
+		return resp, true
+
+	case "reset":
+		if err := al.state.ClearSessionOverride(msg.SenderID); err != nil {
+			return fmt.Sprintf("Failed to clear session override: %v", err), true
+		}
+		return "Switched to automatic session routing", true
+
+	default:
+		return fmt.Sprintf("Unknown session sub-command: %s\nUsage: /session [list|new|resume|delete|reset]", sub), true
+	}
 }
 
 // extractPeer extracts the routing peer from the inbound message's structured Peer field.

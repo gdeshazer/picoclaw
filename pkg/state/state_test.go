@@ -218,9 +218,6 @@ func TestNewManager_EmptyWorkspace(t *testing.T) {
 }
 
 func TestNewManager_MkdirFailureCrashes(t *testing.T) {
-	// Since log.Fatalf calls os.Exit(1), we cannot test it normally
-	// Otherwise, the test suite would stop altogether.
-	// We use the standard pattern of Go: rerun this test in a subprocess.
 	if os.Getenv("BE_CRASHER") == "1" {
 		tmpDir := os.Getenv("CRASH_DIR")
 
@@ -251,4 +248,72 @@ func TestNewManager_MkdirFailureCrashes(t *testing.T) {
 	}
 
 	t.Fatalf("The process ended without error, a crash was expected via os.Exit(1). Err: %v", err)
+}
+
+func TestSetGetSessionOverride(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "state-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sm := NewManager(tmpDir)
+
+	if got := sm.GetSessionOverride("telegram:123"); got != "" {
+		t.Errorf("Expected empty override, got %q", got)
+	}
+
+	if err := sm.SetSessionOverride("telegram:123", "agent:main:telegram:direct:123:named:project-a"); err != nil {
+		t.Fatalf("SetSessionOverride failed: %v", err)
+	}
+
+	got := sm.GetSessionOverride("telegram:123")
+	if got != "agent:main:telegram:direct:123:named:project-a" {
+		t.Errorf("unexpected override: %q", got)
+	}
+
+	if got2 := sm.GetSessionOverride("telegram:456"); got2 != "" {
+		t.Errorf("expected empty override for different sender, got %q", got2)
+	}
+}
+
+func TestClearSessionOverride(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "state-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sm := NewManager(tmpDir)
+
+	sm.SetSessionOverride("telegram:123", "agent:main:main")
+
+	if err := sm.ClearSessionOverride("telegram:123"); err != nil {
+		t.Fatalf("ClearSessionOverride failed: %v", err)
+	}
+
+	if got := sm.GetSessionOverride("telegram:123"); got != "" {
+		t.Errorf("expected empty override after clear, got %q", got)
+	}
+
+	if err := sm.ClearSessionOverride("nonexistent:sender"); err != nil {
+		t.Errorf("ClearSessionOverride of nonexistent sender returned error: %v", err)
+	}
+}
+
+func TestSessionOverride_Persistence(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "state-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sm1 := NewManager(tmpDir)
+	sm1.SetSessionOverride("telegram:999", "agent:main:telegram:direct:999:named:special")
+
+	sm2 := NewManager(tmpDir)
+	got := sm2.GetSessionOverride("telegram:999")
+	if got != "agent:main:telegram:direct:999:named:special" {
+		t.Errorf("override not persisted: got %q", got)
+	}
 }
