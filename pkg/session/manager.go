@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -263,6 +264,54 @@ func (sm *SessionManager) loadSessions() error {
 	}
 
 	return nil
+}
+
+// List returns all loaded sessions sorted by Updated descending.
+func (sm *SessionManager) List() []*Session {
+	sm.mu.RLock()
+	result := make([]*Session, 0, len(sm.sessions))
+	for _, s := range sm.sessions {
+		result = append(result, s)
+	}
+	sm.mu.RUnlock()
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Updated.After(result[j].Updated)
+	})
+	return result
+}
+
+// ListByPeer returns sessions whose key contains the given peerID string (case-insensitive).
+func (sm *SessionManager) ListByPeer(peerID string) []*Session {
+	sm.mu.RLock()
+	lower := strings.ToLower(peerID)
+	result := make([]*Session, 0)
+	for key, s := range sm.sessions {
+		if strings.Contains(strings.ToLower(key), lower) {
+			result = append(result, s)
+		}
+	}
+	sm.mu.RUnlock()
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Updated.After(result[j].Updated)
+	})
+	return result
+}
+
+// Delete removes a session from the in-memory map and deletes the JSON file from disk.
+func (sm *SessionManager) Delete(key string) error {
+	sm.mu.Lock()
+	delete(sm.sessions, key)
+	sm.mu.Unlock()
+	if sm.storage == "" {
+		return nil
+	}
+	filename := sanitizeFilename(key)
+	path := filepath.Join(sm.storage, filename+".json")
+	err := os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // SetHistory updates the messages of a session.

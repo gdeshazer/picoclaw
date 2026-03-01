@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -839,4 +840,171 @@ func TestHandleReasoning(t *testing.T) {
 			t.Fatal("expected reasoning message to be dropped when bus is full, but it was published")
 		}
 	})
+}
+
+// newTestAgentLoop creates a minimal AgentLoop for command-only tests.
+func newTestAgentLoop(t *testing.T) (*AgentLoop, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
+	return al, tmpDir
+}
+
+func makeMsg(senderID, channel, chatID string) bus.InboundMessage {
+	return bus.InboundMessage{
+		Channel:  channel,
+		SenderID: senderID,
+		ChatID:   chatID,
+		Peer:     bus.Peer{Kind: "direct", ID: senderID},
+	}
+}
+
+func TestHandleSessionCommand_NoArgs(t *testing.T) {
+	al, _ := newTestAgentLoop(t)
+	ctx := context.Background()
+	msg := makeMsg("telegram:123", "telegram", "123")
+	msg.Content = "/session"
+
+	resp, handled := al.handleCommand(ctx, msg)
+	if !handled {
+		t.Fatal("expected command to be handled")
+	}
+	if !strings.Contains(resp, "Active session:") {
+		t.Errorf("expected 'Active session:' in response, got: %q", resp)
+	}
+}
+
+func TestHandleSessionCommand_List_NoSessions(t *testing.T) {
+	al, _ := newTestAgentLoop(t)
+	ctx := context.Background()
+	msg := makeMsg("telegram:999", "telegram", "999")
+	msg.Content = "/session list"
+
+	resp, handled := al.handleCommand(ctx, msg)
+	if !handled {
+		t.Fatal("expected command to be handled")
+	}
+	if !strings.Contains(resp, "No sessions found") {
+		t.Errorf("expected 'No sessions found' in response, got: %q", resp)
+	}
+}
+
+func TestHandleSessionCommand_NewAndList(t *testing.T) {
+	al, _ := newTestAgentLoop(t)
+	ctx := context.Background()
+	msg := makeMsg("telegram:42", "telegram", "42")
+
+	// Create a named session.
+	msg.Content = "/session new my-project"
+	resp, _ := al.handleCommand(ctx, msg)
+	if !strings.Contains(resp, "my-project") {
+		t.Errorf("expected 'my-project' in response, got: %q", resp)
+	}
+	if !strings.Contains(resp, "Created and switched to session:") {
+		t.Errorf("expected 'Created and switched to session:' in response, got: %q", resp)
+	}
+
+	// /session should now show override.
+	msg.Content = "/session"
+	resp2, _ := al.handleCommand(ctx, msg)
+	if !strings.Contains(resp2, "override") {
+		t.Errorf("expected 'override' indicator in response, got: %q", resp2)
+	}
+	if !strings.Contains(resp2, "my-project") {
+		t.Errorf("expected 'my-project' in session key, got: %q", resp2)
+	}
+}
+
+func TestHandleSessionCommand_NewWithTimestampLabel(t *testing.T) {
+	al, _ := newTestAgentLoop(t)
+	ctx := context.Background()
+	msg := makeMsg("telegram:77", "telegram", "77")
+
+	// /session new without a label uses a timestamp.
+	msg.Content = "/session new"
+	resp, _ := al.handleCommand(ctx, msg)
+	if !strings.Contains(resp, "named:") {
+		t.Errorf("expected 'named:' in new session key, got: %q", resp)
+	}
+}
+
+func TestHandleSessionCommand_Reset(t *testing.T) {
+	al, _ := newTestAgentLoop(t)
+	ctx := context.Background()
+	msg := makeMsg("telegram:55", "telegram", "55")
+
+	// Set an override first.
+	msg.Content = "/session new test-reset"
+	al.handleCommand(ctx, msg)
+
+	// Now reset.
+	msg.Content = "/session reset"
+	resp, handled := al.handleCommand(ctx, msg)
+	if !handled {
+		t.Fatal("expected command to be handled")
+	}
+	if !strings.Contains(resp, "automatic session routing") {
+		t.Errorf("expected 'automatic session routing' in response, got: %q", resp)
+	}
+
+	// Override should be cleared.
+	if override := al.state.GetSessionOverride("telegram:55"); override != "" {
+		t.Errorf("expected override to be cleared, got: %q", override)
+	}
+}
+
+func TestHandleSessionCommand_Delete(t *testing.T) {
+	al, _ := newTestAgentLoop(t)
+	ctx := context.Background()
+	msg := makeMsg("telegram:88", "telegram", "88")
+
+	// Create a session.
+	msg.Content = "/session new to-delete"
+	resp, _ := al.handleCommand(ctx, msg)
+	// Extract the new session key from the response.
+	var newKey string
+	for _, part := range strings.Fields(resp) {
+		if strings.Contains(part, "named:to-delete") {
+			newKey = part
+			break
+		}
+	}
+	if newKey == "" {
+		t.Fatalf("could not find new session key in response: %q", resp)
+	}
+
+	// Delete the session.
+	msg.Content = "/session delete " + newKey
+	resp2, handled := al.handleCommand(ctx, msg)
+	if !handled {
+		t.Fatal("expected command to be handled")
+	}
+	if !strings.Contains(resp2, "Deleted session:") {
+		t.Errorf("expected 'Deleted session:' in response, got: %q", resp2)
+	}
+}
+
+func TestHandleSessionCommand_ResumeNotFound(t *testing.T) {
+	al, _ := newTestAgentLoop(t)
+	ctx := context.Background()
+	msg := makeMsg("telegram:11", "telegram", "11")
+
+	msg.Content = "/session resume agent:main:nonexistent:session"
+	resp, handled := al.handleCommand(ctx, msg)
+	if !handled {
+		t.Fatal("expected command to be handled")
+	}
+	if !strings.Contains(resp, "Session not found") {
+		t.Errorf("expected 'Session not found' in response, got: %q", resp)
+	}
 }
