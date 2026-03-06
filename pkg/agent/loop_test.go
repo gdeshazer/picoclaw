@@ -13,6 +13,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/channels"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
@@ -28,16 +29,15 @@ func (f *fakeChannel) IsAllowed(string) bool                                   {
 func (f *fakeChannel) IsAllowedSender(sender bus.SenderInfo) bool              { return true }
 func (f *fakeChannel) ReasoningChannelID() string                              { return f.id }
 
-func TestRecordLastChannel(t *testing.T) {
-	// Create temp workspace
+func newTestAgentLoop(
+	t *testing.T,
+) (al *AgentLoop, cfg *config.Config, msgBus *bus.MessageBus, provider *mockProvider, cleanup func()) {
+	t.Helper()
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	// Create test config
-	cfg := &config.Config{
+	cfg = &config.Config{
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace:         tmpDir,
@@ -47,74 +47,43 @@ func TestRecordLastChannel(t *testing.T) {
 			},
 		},
 	}
+	msgBus = bus.NewMessageBus()
+	provider = &mockProvider{}
+	al = NewAgentLoop(cfg, msgBus, provider)
+	return al, cfg, msgBus, provider, func() { os.RemoveAll(tmpDir) }
+}
 
-	// Create agent loop
-	msgBus := bus.NewMessageBus()
-	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
+func TestRecordLastChannel(t *testing.T) {
+	al, cfg, msgBus, provider, cleanup := newTestAgentLoop(t)
+	defer cleanup()
 
-	// Test RecordLastChannel
 	testChannel := "test-channel"
-	err = al.RecordLastChannel(testChannel)
-	if err != nil {
+	if err := al.RecordLastChannel(testChannel); err != nil {
 		t.Fatalf("RecordLastChannel failed: %v", err)
 	}
-
-	// Verify channel was saved
-	lastChannel := al.state.GetLastChannel()
-	if lastChannel != testChannel {
-		t.Errorf("Expected channel '%s', got '%s'", testChannel, lastChannel)
+	if got := al.state.GetLastChannel(); got != testChannel {
+		t.Errorf("Expected channel '%s', got '%s'", testChannel, got)
 	}
-
-	// Verify persistence by creating a new agent loop
 	al2 := NewAgentLoop(cfg, msgBus, provider)
-	if al2.state.GetLastChannel() != testChannel {
-		t.Errorf("Expected persistent channel '%s', got '%s'", testChannel, al2.state.GetLastChannel())
+	if got := al2.state.GetLastChannel(); got != testChannel {
+		t.Errorf("Expected persistent channel '%s', got '%s'", testChannel, got)
 	}
 }
 
 func TestRecordLastChatID(t *testing.T) {
-	// Create temp workspace
-	tmpDir, err := os.MkdirTemp("", "agent-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	al, cfg, msgBus, provider, cleanup := newTestAgentLoop(t)
+	defer cleanup()
 
-	// Create test config
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				Model:             "test-model",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-			},
-		},
-	}
-
-	// Create agent loop
-	msgBus := bus.NewMessageBus()
-	provider := &mockProvider{}
-	al := NewAgentLoop(cfg, msgBus, provider)
-
-	// Test RecordLastChatID
 	testChatID := "test-chat-id-123"
-	err = al.RecordLastChatID(testChatID)
-	if err != nil {
+	if err := al.RecordLastChatID(testChatID); err != nil {
 		t.Fatalf("RecordLastChatID failed: %v", err)
 	}
-
-	// Verify chat ID was saved
-	lastChatID := al.state.GetLastChatID()
-	if lastChatID != testChatID {
-		t.Errorf("Expected chat ID '%s', got '%s'", testChatID, lastChatID)
+	if got := al.state.GetLastChatID(); got != testChatID {
+		t.Errorf("Expected chat ID '%s', got '%s'", testChatID, got)
 	}
-
-	// Verify persistence by creating a new agent loop
 	al2 := NewAgentLoop(cfg, msgBus, provider)
-	if al2.state.GetLastChatID() != testChatID {
-		t.Errorf("Expected persistent chat ID '%s', got '%s'", testChatID, al2.state.GetLastChatID())
+	if got := al2.state.GetLastChatID(); got != testChatID {
+		t.Errorf("Expected persistent chat ID '%s', got '%s'", testChatID, got)
 	}
 }
 
@@ -195,35 +164,21 @@ func TestToolRegistry_ToolRegistration(t *testing.T) {
 	}
 }
 
-// TestToolContext_Updates verifies tool context is updated with channel/chatID
+// TestToolContext_Updates verifies tool context helpers work correctly
 func TestToolContext_Updates(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "agent-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	ctx := tools.WithToolContext(context.Background(), "telegram", "chat-42")
 
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				Model:             "test-model",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-			},
-		},
+	if got := tools.ToolChannel(ctx); got != "telegram" {
+		t.Errorf("expected channel 'telegram', got %q", got)
+	}
+	if got := tools.ToolChatID(ctx); got != "chat-42" {
+		t.Errorf("expected chatID 'chat-42', got %q", got)
 	}
 
-	msgBus := bus.NewMessageBus()
-	provider := &simpleMockProvider{response: "OK"}
-	_ = NewAgentLoop(cfg, msgBus, provider)
-
-	// Verify that ContextualTool interface is defined and can be implemented
-	// This test validates the interface contract exists
-	ctxTool := &mockContextualTool{}
-
-	// Verify the tool implements the interface correctly
-	var _ tools.ContextualTool = ctxTool
+	// Empty context returns empty strings
+	if got := tools.ToolChannel(context.Background()); got != "" {
+		t.Errorf("expected empty channel from bare context, got %q", got)
+	}
 }
 
 // TestToolRegistry_GetDefinitions verifies tool definitions can be retrieved
@@ -272,16 +227,11 @@ func TestAgentLoop_GetStartupInfo(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				Model:             "test-model",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-			},
-		},
-	}
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Workspace = tmpDir
+	cfg.Agents.Defaults.Model = "test-model"
+	cfg.Agents.Defaults.MaxTokens = 4096
+	cfg.Agents.Defaults.MaxToolIterations = 10
 
 	msgBus := bus.NewMessageBus()
 	provider := &mockProvider{}
@@ -388,36 +338,6 @@ func (m *mockCustomTool) Parameters() map[string]any {
 
 func (m *mockCustomTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
 	return tools.SilentResult("Custom tool executed")
-}
-
-// mockContextualTool tracks context updates
-type mockContextualTool struct {
-	lastChannel string
-	lastChatID  string
-}
-
-func (m *mockContextualTool) Name() string {
-	return "mock_contextual"
-}
-
-func (m *mockContextualTool) Description() string {
-	return "Mock contextual tool"
-}
-
-func (m *mockContextualTool) Parameters() map[string]any {
-	return map[string]any{
-		"type":       "object",
-		"properties": map[string]any{},
-	}
-}
-
-func (m *mockContextualTool) Execute(ctx context.Context, args map[string]any) *tools.ToolResult {
-	return tools.SilentResult("Contextual tool executed")
-}
-
-func (m *mockContextualTool) SetContext(channel, chatID string) {
-	m.lastChannel = channel
-	m.lastChatID = chatID
 }
 
 // testHelper executes a message and returns the response
@@ -842,22 +762,143 @@ func TestHandleReasoning(t *testing.T) {
 	})
 }
 
-// newTestAgentLoop creates a minimal AgentLoop for command-only tests.
-func newTestAgentLoop(t *testing.T) (*AgentLoop, string) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	cfg := &config.Config{
-		Agents: config.AgentsConfig{
-			Defaults: config.AgentDefaults{
-				Workspace:         tmpDir,
-				Model:             "test-model",
-				MaxTokens:         4096,
-				MaxToolIterations: 10,
-			},
-		},
+func TestResolveMediaRefs_ResolvesToBase64(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	// Create a minimal valid PNG (8-byte header is enough for filetype detection)
+	pngPath := filepath.Join(dir, "test.png")
+	// PNG magic: 0x89 P N G \r \n 0x1A \n + minimal IHDR
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+		0x00, 0x00, 0x00, 0x0D, // IHDR length
+		0x49, 0x48, 0x44, 0x52, // "IHDR"
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, // 1x1 RGB
+		0x00, 0x00, 0x00, // no interlace
+		0x90, 0x77, 0x53, 0xDE, // CRC
 	}
-	al := NewAgentLoop(cfg, bus.NewMessageBus(), &mockProvider{})
-	return al, tmpDir
+	if err := os.WriteFile(pngPath, pngHeader, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := store.Store(pngPath, media.MediaMeta{}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	messages := []providers.Message{
+		{Role: "user", Content: "describe this", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 1 {
+		t.Fatalf("expected 1 resolved media, got %d", len(result[0].Media))
+	}
+	if !strings.HasPrefix(result[0].Media[0], "data:image/png;base64,") {
+		t.Fatalf("expected data:image/png;base64, prefix, got %q", result[0].Media[0][:40])
+	}
+}
+
+func TestResolveMediaRefs_SkipsOversizedFile(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	bigPath := filepath.Join(dir, "big.png")
+	// Write PNG header + padding to exceed limit
+	data := make([]byte, 1024+1) // 1KB + 1 byte
+	copy(data, []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A})
+	if err := os.WriteFile(bigPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := store.Store(bigPath, media.MediaMeta{}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
+	}
+	// Use a tiny limit (1KB) so the file is oversized
+	result := resolveMediaRefs(messages, store, 1024)
+
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media (oversized), got %d", len(result[0].Media))
+	}
+}
+
+func TestResolveMediaRefs_SkipsUnknownType(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	txtPath := filepath.Join(dir, "readme.txt")
+	if err := os.WriteFile(txtPath, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := store.Store(txtPath, media.MediaMeta{}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media (unknown type), got %d", len(result[0].Media))
+	}
+}
+
+func TestResolveMediaRefs_PassesThroughNonMediaRefs(t *testing.T) {
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{"https://example.com/img.png"}},
+	}
+	result := resolveMediaRefs(messages, nil, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 1 || result[0].Media[0] != "https://example.com/img.png" {
+		t.Fatalf("expected passthrough of non-media:// URL, got %v", result[0].Media)
+	}
+}
+
+func TestResolveMediaRefs_DoesNotMutateOriginal(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+	pngPath := filepath.Join(dir, "test.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	os.WriteFile(pngPath, pngHeader, 0o644)
+	ref, _ := store.Store(pngPath, media.MediaMeta{}, "test")
+
+	original := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
+	}
+	originalRef := original[0].Media[0]
+
+	resolveMediaRefs(original, store, config.DefaultMaxMediaSize)
+
+	if original[0].Media[0] != originalRef {
+		t.Fatal("resolveMediaRefs mutated original message slice")
+	}
+}
+
+func TestResolveMediaRefs_UsesMetaContentType(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	// File with JPEG content but stored with explicit content type
+	jpegPath := filepath.Join(dir, "photo")
+	jpegHeader := []byte{0xFF, 0xD8, 0xFF, 0xE0} // JPEG magic bytes
+	os.WriteFile(jpegPath, jpegHeader, 0o644)
+	ref, _ := store.Store(jpegPath, media.MediaMeta{ContentType: "image/jpeg"}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "hi", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 1 {
+		t.Fatalf("expected 1 media, got %d", len(result[0].Media))
+	}
+	if !strings.HasPrefix(result[0].Media[0], "data:image/jpeg;base64,") {
+		t.Fatalf("expected jpeg prefix, got %q", result[0].Media[0][:30])
+	}
 }
 
 func makeMsg(senderID, channel, chatID string) bus.InboundMessage {
@@ -870,7 +911,7 @@ func makeMsg(senderID, channel, chatID string) bus.InboundMessage {
 }
 
 func TestHandleSessionCommand_NoArgs(t *testing.T) {
-	al, _ := newTestAgentLoop(t)
+	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
 	msg := makeMsg("telegram:123", "telegram", "123")
 	msg.Content = "/session"
@@ -885,7 +926,7 @@ func TestHandleSessionCommand_NoArgs(t *testing.T) {
 }
 
 func TestHandleSessionCommand_List_NoSessions(t *testing.T) {
-	al, _ := newTestAgentLoop(t)
+	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
 	msg := makeMsg("telegram:999", "telegram", "999")
 	msg.Content = "/session list"
@@ -900,11 +941,10 @@ func TestHandleSessionCommand_List_NoSessions(t *testing.T) {
 }
 
 func TestHandleSessionCommand_NewAndList(t *testing.T) {
-	al, _ := newTestAgentLoop(t)
+	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
 	msg := makeMsg("telegram:42", "telegram", "42")
 
-	// Create a named session.
 	msg.Content = "/session new my-project"
 	resp, _ := al.handleCommand(ctx, msg)
 	if !strings.Contains(resp, "my-project") {
@@ -914,7 +954,6 @@ func TestHandleSessionCommand_NewAndList(t *testing.T) {
 		t.Errorf("expected 'Created and switched to session:' in response, got: %q", resp)
 	}
 
-	// /session should now show override.
 	msg.Content = "/session"
 	resp2, _ := al.handleCommand(ctx, msg)
 	if !strings.Contains(resp2, "override") {
@@ -926,11 +965,10 @@ func TestHandleSessionCommand_NewAndList(t *testing.T) {
 }
 
 func TestHandleSessionCommand_NewWithTimestampLabel(t *testing.T) {
-	al, _ := newTestAgentLoop(t)
+	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
 	msg := makeMsg("telegram:77", "telegram", "77")
 
-	// /session new without a label uses a timestamp.
 	msg.Content = "/session new"
 	resp, _ := al.handleCommand(ctx, msg)
 	if !strings.Contains(resp, "named:") {
@@ -939,15 +977,13 @@ func TestHandleSessionCommand_NewWithTimestampLabel(t *testing.T) {
 }
 
 func TestHandleSessionCommand_Reset(t *testing.T) {
-	al, _ := newTestAgentLoop(t)
+	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
 	msg := makeMsg("telegram:55", "telegram", "55")
 
-	// Set an override first.
 	msg.Content = "/session new test-reset"
 	al.handleCommand(ctx, msg)
 
-	// Now reset.
 	msg.Content = "/session reset"
 	resp, handled := al.handleCommand(ctx, msg)
 	if !handled {
@@ -957,21 +993,18 @@ func TestHandleSessionCommand_Reset(t *testing.T) {
 		t.Errorf("expected 'automatic session routing' in response, got: %q", resp)
 	}
 
-	// Override should be cleared.
 	if override := al.state.GetSessionOverride("telegram:55"); override != "" {
 		t.Errorf("expected override to be cleared, got: %q", override)
 	}
 }
 
 func TestHandleSessionCommand_Delete(t *testing.T) {
-	al, _ := newTestAgentLoop(t)
+	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
 	msg := makeMsg("telegram:88", "telegram", "88")
 
-	// Create a session.
 	msg.Content = "/session new to-delete"
 	resp, _ := al.handleCommand(ctx, msg)
-	// Extract the new session key from the response.
 	var newKey string
 	for _, part := range strings.Fields(resp) {
 		if strings.Contains(part, "named:to-delete") {
@@ -983,7 +1016,6 @@ func TestHandleSessionCommand_Delete(t *testing.T) {
 		t.Fatalf("could not find new session key in response: %q", resp)
 	}
 
-	// Delete the session.
 	msg.Content = "/session delete " + newKey
 	resp2, handled := al.handleCommand(ctx, msg)
 	if !handled {
@@ -995,7 +1027,7 @@ func TestHandleSessionCommand_Delete(t *testing.T) {
 }
 
 func TestHandleSessionCommand_ResumeNotFound(t *testing.T) {
-	al, _ := newTestAgentLoop(t)
+	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
 	msg := makeMsg("telegram:11", "telegram", "11")
 
