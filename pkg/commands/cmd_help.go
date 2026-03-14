@@ -28,17 +28,25 @@ func formatHelpMessage(defs []Definition) string {
 		return "No commands available."
 	}
 
-	lines := make([]string, 0, len(defs))
+	lines := make([]string, 0, len(defs)*2)
+	lines = append(lines, "Available commands:\n")
 	for _, def := range defs {
-		usage := def.EffectiveUsage()
-		if usage == "" {
-			usage = "/" + def.Name
-		}
 		desc := def.Description
 		if desc == "" {
 			desc = "No description"
 		}
-		lines = append(lines, fmt.Sprintf("%s - %s", usage, desc))
+		lines = append(lines, fmt.Sprintf("/%s - %s", def.Name, desc))
+		for _, sc := range def.SubCommands {
+			sub := sc.Name
+			if sc.ArgsUsage != "" {
+				sub += " " + sc.ArgsUsage
+			}
+			scDesc := sc.Description
+			if scDesc == "" {
+				scDesc = "No description"
+			}
+			lines = append(lines, fmt.Sprintf("  %s - %s", sub, scDesc))
+		}
 	}
 	return strings.Join(lines, "\n")
 }
