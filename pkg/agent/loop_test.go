@@ -15,6 +15,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
@@ -318,6 +319,29 @@ func (m *simpleMockProvider) GetDefaultModel() string {
 	return "mock-model"
 }
 
+type countingMockProvider struct {
+	response string
+	calls    int
+}
+
+func (m *countingMockProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	m.calls++
+	return &providers.LLMResponse{
+		Content:   m.response,
+		ToolCalls: []providers.ToolCall{},
+	}, nil
+}
+
+func (m *countingMockProvider) GetDefaultModel() string {
+	return "counting-mock-model"
+}
+
 // mockCustomTool is a simple mock tool for registration testing
 type mockCustomTool struct{}
 
@@ -358,6 +382,198 @@ func (h testHelper) executeAndGetResponse(tb testing.TB, ctx context.Context, ms
 }
 
 const responseTimeout = 3 * time.Second
+
+func TestProcessMessage_UsesRouteSessionKey(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &simpleMockProvider{response: "ok"}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	msg := bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "hello",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user1",
+		},
+	}
+
+	route := al.registry.ResolveRoute(routing.RouteInput{
+		Channel: msg.Channel,
+		Peer:    extractPeer(msg),
+	})
+	sessionKey := route.SessionKey
+
+	defaultAgent := al.registry.GetDefaultAgent()
+	if defaultAgent == nil {
+		t.Fatal("No default agent found")
+	}
+
+	helper := testHelper{al: al}
+	_ = helper.executeAndGetResponse(t, context.Background(), msg)
+
+	history := defaultAgent.Sessions.GetHistory(sessionKey)
+	if len(history) != 2 {
+		t.Fatalf("expected session history len=2, got %d", len(history))
+	}
+	if history[0].Role != "user" || history[0].Content != "hello" {
+		t.Fatalf("unexpected first message in session: %+v", history[0])
+	}
+}
+
+func TestProcessMessage_CommandOutcomes(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		Session: config.SessionConfig{
+			DMScope: "per-channel-peer",
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &countingMockProvider{response: "LLM reply"}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	helper := testHelper{al: al}
+
+	baseMsg := bus.InboundMessage{
+		Channel:  "whatsapp",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user1",
+		},
+	}
+
+	showResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  baseMsg.Channel,
+		SenderID: baseMsg.SenderID,
+		ChatID:   baseMsg.ChatID,
+		Content:  "/show channel",
+		Peer:     baseMsg.Peer,
+	})
+	if showResp != "Current Channel: whatsapp" {
+		t.Fatalf("unexpected /show reply: %q", showResp)
+	}
+	if provider.calls != 0 {
+		t.Fatalf("LLM should not be called for handled command, calls=%d", provider.calls)
+	}
+
+	fooResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  baseMsg.Channel,
+		SenderID: baseMsg.SenderID,
+		ChatID:   baseMsg.ChatID,
+		Content:  "/foo",
+		Peer:     baseMsg.Peer,
+	})
+	if fooResp != "LLM reply" {
+		t.Fatalf("unexpected /foo reply: %q", fooResp)
+	}
+	if provider.calls != 1 {
+		t.Fatalf("LLM should be called exactly once after /foo passthrough, calls=%d", provider.calls)
+	}
+
+	newResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  baseMsg.Channel,
+		SenderID: baseMsg.SenderID,
+		ChatID:   baseMsg.ChatID,
+		Content:  "/new",
+		Peer:     baseMsg.Peer,
+	})
+	if newResp != "LLM reply" {
+		t.Fatalf("unexpected /new reply: %q", newResp)
+	}
+	if provider.calls != 2 {
+		t.Fatalf("LLM should be called for passthrough /new command, calls=%d", provider.calls)
+	}
+}
+
+func TestProcessMessage_SwitchModelShowModelConsistency(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Provider:          "openai",
+				Model:             "before-switch",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &countingMockProvider{response: "LLM reply"}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	helper := testHelper{al: al}
+
+	switchResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "/switch model to after-switch",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user1",
+		},
+	})
+	if !strings.Contains(switchResp, "Switched model from before-switch to after-switch") {
+		t.Fatalf("unexpected /switch reply: %q", switchResp)
+	}
+
+	showResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "/show model",
+		Peer: bus.Peer{
+			Kind: "direct",
+			ID:   "user1",
+		},
+	})
+	if !strings.Contains(showResp, "Current Model: after-switch (Provider: openai)") {
+		t.Fatalf("unexpected /show model reply after switch: %q", showResp)
+	}
+
+	if provider.calls != 0 {
+		t.Fatalf("LLM should not be called for /switch and /show, calls=%d", provider.calls)
+	}
+}
 
 // TestToolResult_SilentToolDoesNotSendUserMessage verifies silent tools don't trigger outbound
 func TestToolResult_SilentToolDoesNotSendUserMessage(t *testing.T) {
@@ -551,6 +767,63 @@ func TestAgentLoop_ContextExhaustionRetry(t *testing.T) {
 	// Without compression: 6 + 1 (new user msg) + 1 (assistant msg) = 8
 	if len(finalHistory) >= 8 {
 		t.Errorf("Expected history to be compressed (len < 8), got %d", len(finalHistory))
+	}
+}
+
+// TestProcessDirectWithChannel_TriggersMCPInitialization verifies that
+// ProcessDirectWithChannel triggers MCP initialization when MCP is enabled.
+// Note: Manager is only initialized when at least one MCP server is configured
+// and successfully connected.
+func TestProcessDirectWithChannel_TriggersMCPInitialization(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "agent-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test with MCP enabled but no servers - should not initialize manager
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{
+			Defaults: config.AgentDefaults{
+				Workspace:         tmpDir,
+				Model:             "test-model",
+				MaxTokens:         4096,
+				MaxToolIterations: 10,
+			},
+		},
+		Tools: config.ToolsConfig{
+			MCP: config.MCPConfig{
+				ToolConfig: config.ToolConfig{
+					Enabled: true,
+				},
+				// No servers configured - manager should not be initialized
+			},
+		},
+	}
+
+	msgBus := bus.NewMessageBus()
+	provider := &mockProvider{}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	defer al.Close()
+
+	if al.mcp.hasManager() {
+		t.Fatal("expected MCP manager to be nil before first direct processing")
+	}
+
+	_, err = al.ProcessDirectWithChannel(
+		context.Background(),
+		"hello",
+		"session-1",
+		"cli",
+		"direct",
+	)
+	if err != nil {
+		t.Fatalf("ProcessDirectWithChannel failed: %v", err)
+	}
+
+	// Manager should not be initialized when no servers are configured
+	if al.mcp.hasManager() {
+		t.Fatal("expected MCP manager to be nil when no servers are configured")
 	}
 }
 
@@ -822,7 +1095,7 @@ func TestResolveMediaRefs_SkipsOversizedFile(t *testing.T) {
 	}
 }
 
-func TestResolveMediaRefs_SkipsUnknownType(t *testing.T) {
+func TestResolveMediaRefs_UnknownTypeInjectsPath(t *testing.T) {
 	store := media.NewFileMediaStore()
 	dir := t.TempDir()
 
@@ -838,7 +1111,11 @@ func TestResolveMediaRefs_SkipsUnknownType(t *testing.T) {
 	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
 
 	if len(result[0].Media) != 0 {
-		t.Fatalf("expected 0 media (unknown type), got %d", len(result[0].Media))
+		t.Fatalf("expected 0 media entries, got %d", len(result[0].Media))
+	}
+	expected := "hi [file:" + txtPath + "]"
+	if result[0].Content != expected {
+		t.Fatalf("expected content %q, got %q", expected, result[0].Content)
 	}
 }
 
@@ -916,7 +1193,8 @@ func TestHandleSessionCommand_NoArgs(t *testing.T) {
 	msg := makeMsg("telegram:123", "telegram", "123")
 	msg.Content = "/session"
 
-	resp, handled := al.handleCommand(ctx, msg)
+	agent := al.registry.GetDefaultAgent()
+	resp, handled := al.handleCommand(ctx, msg, agent, nil)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
@@ -927,11 +1205,12 @@ func TestHandleSessionCommand_NoArgs(t *testing.T) {
 
 func TestHandleSessionCommand_List_NoSessions(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
+	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:999", "telegram", "999")
 	msg.Content = "/session list"
 
-	resp, handled := al.handleCommand(ctx, msg)
+	resp, handled := al.handleCommand(ctx, msg, agent, nil)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
@@ -942,11 +1221,12 @@ func TestHandleSessionCommand_List_NoSessions(t *testing.T) {
 
 func TestHandleSessionCommand_NewAndList(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
+	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:42", "telegram", "42")
 
 	msg.Content = "/session new my-project"
-	resp, _ := al.handleCommand(ctx, msg)
+	resp, _ := al.handleCommand(ctx, msg, agent, nil)
 	if !strings.Contains(resp, "my-project") {
 		t.Errorf("expected 'my-project' in response, got: %q", resp)
 	}
@@ -955,7 +1235,7 @@ func TestHandleSessionCommand_NewAndList(t *testing.T) {
 	}
 
 	msg.Content = "/session"
-	resp2, _ := al.handleCommand(ctx, msg)
+	resp2, _ := al.handleCommand(ctx, msg, agent, nil)
 	if !strings.Contains(resp2, "override") {
 		t.Errorf("expected 'override' indicator in response, got: %q", resp2)
 	}
@@ -966,11 +1246,12 @@ func TestHandleSessionCommand_NewAndList(t *testing.T) {
 
 func TestHandleSessionCommand_NewWithTimestampLabel(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
+	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:77", "telegram", "77")
 
 	msg.Content = "/session new"
-	resp, _ := al.handleCommand(ctx, msg)
+	resp, _ := al.handleCommand(ctx, msg, agent, nil)
 	if !strings.Contains(resp, "named:") {
 		t.Errorf("expected 'named:' in new session key, got: %q", resp)
 	}
@@ -978,14 +1259,15 @@ func TestHandleSessionCommand_NewWithTimestampLabel(t *testing.T) {
 
 func TestHandleSessionCommand_Reset(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
+	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:55", "telegram", "55")
 
 	msg.Content = "/session new test-reset"
-	al.handleCommand(ctx, msg)
+	al.handleCommand(ctx, msg, agent, nil)
 
 	msg.Content = "/session reset"
-	resp, handled := al.handleCommand(ctx, msg)
+	resp, handled := al.handleCommand(ctx, msg, agent, nil)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
@@ -1000,11 +1282,12 @@ func TestHandleSessionCommand_Reset(t *testing.T) {
 
 func TestHandleSessionCommand_Delete(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
+	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:88", "telegram", "88")
 
 	msg.Content = "/session new to-delete"
-	resp, _ := al.handleCommand(ctx, msg)
+	resp, _ := al.handleCommand(ctx, msg, agent, nil)
 	var newKey string
 	for _, part := range strings.Fields(resp) {
 		if strings.Contains(part, "named:to-delete") {
@@ -1017,7 +1300,7 @@ func TestHandleSessionCommand_Delete(t *testing.T) {
 	}
 
 	msg.Content = "/session delete " + newKey
-	resp2, handled := al.handleCommand(ctx, msg)
+	resp2, handled := al.handleCommand(ctx, msg, agent, nil)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
@@ -1028,15 +1311,157 @@ func TestHandleSessionCommand_Delete(t *testing.T) {
 
 func TestHandleSessionCommand_ResumeNotFound(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
+	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:11", "telegram", "11")
 
 	msg.Content = "/session resume agent:main:nonexistent:session"
-	resp, handled := al.handleCommand(ctx, msg)
+	resp, handled := al.handleCommand(ctx, msg, agent, nil)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
-	if !strings.Contains(resp, "Session not found") {
-		t.Errorf("expected 'Session not found' in response, got: %q", resp)
+	if !strings.Contains(strings.ToLower(resp), "session not found") {
+		t.Errorf("expected 'session not found' in response, got: %q", resp)
+	}
+}
+
+func TestResolveMediaRefs_PDFInjectsFilePath(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	pdfPath := filepath.Join(dir, "report.pdf")
+	// PDF magic bytes
+	os.WriteFile(pdfPath, []byte("%PDF-1.4 test content"), 0o644)
+	ref, _ := store.Store(pdfPath, media.MediaMeta{ContentType: "application/pdf"}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "report.pdf [file]", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media (non-image), got %d", len(result[0].Media))
+	}
+	expected := "report.pdf [file:" + pdfPath + "]"
+	if result[0].Content != expected {
+		t.Fatalf("expected content %q, got %q", expected, result[0].Content)
+	}
+}
+
+func TestResolveMediaRefs_AudioInjectsAudioPath(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	oggPath := filepath.Join(dir, "voice.ogg")
+	os.WriteFile(oggPath, []byte("fake audio"), 0o644)
+	ref, _ := store.Store(oggPath, media.MediaMeta{ContentType: "audio/ogg"}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "voice.ogg [audio]", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media, got %d", len(result[0].Media))
+	}
+	expected := "voice.ogg [audio:" + oggPath + "]"
+	if result[0].Content != expected {
+		t.Fatalf("expected content %q, got %q", expected, result[0].Content)
+	}
+}
+
+func TestResolveMediaRefs_VideoInjectsVideoPath(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	mp4Path := filepath.Join(dir, "clip.mp4")
+	os.WriteFile(mp4Path, []byte("fake video"), 0o644)
+	ref, _ := store.Store(mp4Path, media.MediaMeta{ContentType: "video/mp4"}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "clip.mp4 [video]", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 0 {
+		t.Fatalf("expected 0 media, got %d", len(result[0].Media))
+	}
+	expected := "clip.mp4 [video:" + mp4Path + "]"
+	if result[0].Content != expected {
+		t.Fatalf("expected content %q, got %q", expected, result[0].Content)
+	}
+}
+
+func TestResolveMediaRefs_NoGenericTagAppendsPath(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	csvPath := filepath.Join(dir, "data.csv")
+	os.WriteFile(csvPath, []byte("a,b,c"), 0o644)
+	ref, _ := store.Store(csvPath, media.MediaMeta{ContentType: "text/csv"}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "here is my data", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	expected := "here is my data [file:" + csvPath + "]"
+	if result[0].Content != expected {
+		t.Fatalf("expected content %q, got %q", expected, result[0].Content)
+	}
+}
+
+func TestResolveMediaRefs_EmptyContentGetsPathTag(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	docPath := filepath.Join(dir, "doc.docx")
+	os.WriteFile(docPath, []byte("fake docx"), 0o644)
+	docxMIME := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	ref, _ := store.Store(docPath, media.MediaMeta{ContentType: docxMIME}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "", Media: []string{ref}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	expected := "[file:" + docPath + "]"
+	if result[0].Content != expected {
+		t.Fatalf("expected content %q, got %q", expected, result[0].Content)
+	}
+}
+
+func TestResolveMediaRefs_MixedImageAndFile(t *testing.T) {
+	store := media.NewFileMediaStore()
+	dir := t.TempDir()
+
+	pngPath := filepath.Join(dir, "photo.png")
+	pngHeader := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02,
+		0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+	}
+	os.WriteFile(pngPath, pngHeader, 0o644)
+	imgRef, _ := store.Store(pngPath, media.MediaMeta{}, "test")
+
+	pdfPath := filepath.Join(dir, "report.pdf")
+	os.WriteFile(pdfPath, []byte("%PDF-1.4 test"), 0o644)
+	fileRef, _ := store.Store(pdfPath, media.MediaMeta{ContentType: "application/pdf"}, "test")
+
+	messages := []providers.Message{
+		{Role: "user", Content: "check these [file]", Media: []string{imgRef, fileRef}},
+	}
+	result := resolveMediaRefs(messages, store, config.DefaultMaxMediaSize)
+
+	if len(result[0].Media) != 1 {
+		t.Fatalf("expected 1 media (image only), got %d", len(result[0].Media))
+	}
+	if !strings.HasPrefix(result[0].Media[0], "data:image/png;base64,") {
+		t.Fatal("expected image to be base64 encoded")
+	}
+	expectedContent := "check these [file:" + pdfPath + "]"
+	if result[0].Content != expectedContent {
+		t.Fatalf("expected content %q, got %q", expectedContent, result[0].Content)
 	}
 }
