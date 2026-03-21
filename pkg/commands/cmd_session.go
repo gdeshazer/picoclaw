@@ -24,23 +24,18 @@ func sessionCommand() Definition {
 		SubCommands: []SubCommand{
 			{
 				Name:        "list",
-				Description: "List sessions for a peer",
-				ArgsUsage:   "[peer_id]",
+				Description: "List your sessions",
 				Handler: func(_ context.Context, req Request, rt *Runtime) error {
 					if rt == nil || rt.Session == nil {
 						return req.Reply(unavailableMsg)
 					}
-					peerID := req.SenderID
-					if arg := nthToken(req.Text, 2); arg != "" {
-						peerID = arg
-					}
-					sessions := rt.Session.ListByPeer(peerID)
+					sessions := rt.Session.ListByPeer(req.SenderID)
 					if len(sessions) == 0 {
-						return req.Reply(fmt.Sprintf("No sessions found for %s", peerID))
+						return req.Reply("No sessions found")
 					}
 					activeKey, _ := rt.Session.GetActiveKey(req.SenderID)
 					var sb strings.Builder
-					sb.WriteString(fmt.Sprintf("Sessions for %s:\n", peerID))
+					sb.WriteString("Your sessions:\n")
 					for _, s := range sessions {
 						if s.Key == activeKey {
 							sb.WriteString(fmt.Sprintf("  [active] %s  (updated: %s)\n", s.Key, s.Updated.Format("2006-01-02")))

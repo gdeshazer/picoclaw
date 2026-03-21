@@ -248,6 +248,9 @@ func TestSessionCommand_List(t *testing.T) {
 	if res.Outcome != OutcomeHandled {
 		t.Fatalf("outcome=%v, want handled", res.Outcome)
 	}
+	if !strings.Contains(reply, "Your sessions:") {
+		t.Fatalf("expected 'Your sessions:' header, got %q", reply)
+	}
 	if !strings.Contains(reply, "[active] key1") {
 		t.Fatalf("expected active marker on key1, got %q", reply)
 	}

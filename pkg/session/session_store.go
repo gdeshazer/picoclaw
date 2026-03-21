@@ -28,7 +28,10 @@ type SessionStore interface {
 	// TruncateHistory keeps only the last keepLast messages.
 	TruncateHistory(key string, keepLast int)
 	// ListByPeer returns sessions whose key contains the given peerID (case-insensitive).
+	// Deprecated: Use ListByPrefix for ownership-scoped listing.
 	ListByPeer(peerID string) []*Session
+	// ListByPrefix returns sessions whose key equals prefix or starts with prefix+":".
+	ListByPrefix(prefix string) []*Session
 	// Delete removes a session from storage.
 	Delete(key string) error
 	// Save persists any pending state to durable storage.

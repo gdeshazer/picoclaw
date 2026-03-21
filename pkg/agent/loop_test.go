@@ -1662,6 +1662,12 @@ func makeMsg(senderID, channel, chatID string) bus.InboundMessage {
 	}
 }
 
+func makeOpts(senderID string) *processOptions {
+	return &processOptions{
+		SessionKey: "agent:main:telegram:direct:" + senderID,
+	}
+}
+
 func TestHandleSessionCommand_NoArgs(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
 	ctx := context.Background()
@@ -1685,7 +1691,7 @@ func TestHandleSessionCommand_List_NoSessions(t *testing.T) {
 	msg := makeMsg("telegram:999", "telegram", "999")
 	msg.Content = "/session list"
 
-	resp, handled := al.handleCommand(ctx, msg, agent, nil)
+	resp, handled := al.handleCommand(ctx, msg, agent, makeOpts("telegram:999"))
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
@@ -1699,9 +1705,10 @@ func TestHandleSessionCommand_NewAndList(t *testing.T) {
 	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:42", "telegram", "42")
+	opts := makeOpts("telegram:42")
 
 	msg.Content = "/session new my-project"
-	resp, _ := al.handleCommand(ctx, msg, agent, nil)
+	resp, _ := al.handleCommand(ctx, msg, agent, opts)
 	if !strings.Contains(resp, "my-project") {
 		t.Errorf("expected 'my-project' in response, got: %q", resp)
 	}
@@ -1710,7 +1717,7 @@ func TestHandleSessionCommand_NewAndList(t *testing.T) {
 	}
 
 	msg.Content = "/session"
-	resp2, _ := al.handleCommand(ctx, msg, agent, nil)
+	resp2, _ := al.handleCommand(ctx, msg, agent, opts)
 	if !strings.Contains(resp2, "override") {
 		t.Errorf("expected 'override' indicator in response, got: %q", resp2)
 	}
@@ -1726,7 +1733,7 @@ func TestHandleSessionCommand_NewWithTimestampLabel(t *testing.T) {
 	msg := makeMsg("telegram:77", "telegram", "77")
 
 	msg.Content = "/session new"
-	resp, _ := al.handleCommand(ctx, msg, agent, nil)
+	resp, _ := al.handleCommand(ctx, msg, agent, makeOpts("telegram:77"))
 	if !strings.Contains(resp, "named:") {
 		t.Errorf("expected 'named:' in new session key, got: %q", resp)
 	}
@@ -1737,12 +1744,13 @@ func TestHandleSessionCommand_Reset(t *testing.T) {
 	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:55", "telegram", "55")
+	opts := makeOpts("telegram:55")
 
 	msg.Content = "/session new test-reset"
-	al.handleCommand(ctx, msg, agent, nil)
+	al.handleCommand(ctx, msg, agent, opts)
 
 	msg.Content = "/session reset"
-	resp, handled := al.handleCommand(ctx, msg, agent, nil)
+	resp, handled := al.handleCommand(ctx, msg, agent, opts)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
@@ -1760,9 +1768,10 @@ func TestHandleSessionCommand_Delete(t *testing.T) {
 	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:88", "telegram", "88")
+	opts := makeOpts("telegram:88")
 
 	msg.Content = "/session new to-delete"
-	resp, _ := al.handleCommand(ctx, msg, agent, nil)
+	resp, _ := al.handleCommand(ctx, msg, agent, opts)
 	var newKey string
 	for _, part := range strings.Fields(resp) {
 		if strings.Contains(part, "named:to-delete") {
@@ -1775,7 +1784,7 @@ func TestHandleSessionCommand_Delete(t *testing.T) {
 	}
 
 	msg.Content = "/session delete " + newKey
-	resp2, handled := al.handleCommand(ctx, msg, agent, nil)
+	resp2, handled := al.handleCommand(ctx, msg, agent, opts)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
@@ -1784,19 +1793,41 @@ func TestHandleSessionCommand_Delete(t *testing.T) {
 	}
 }
 
-func TestHandleSessionCommand_ResumeNotFound(t *testing.T) {
+func TestHandleSessionCommand_ResumeAccessDenied(t *testing.T) {
 	al, _, _, _, _ := newTestAgentLoop(t)
 	agent := al.registry.GetDefaultAgent()
 	ctx := context.Background()
 	msg := makeMsg("telegram:11", "telegram", "11")
 
-	msg.Content = "/session resume agent:main:nonexistent:session"
+	// Attempting to resume another user's session should be denied.
+	msg.Content = "/session resume agent:main:telegram:direct:other-user"
 	resp, handled := al.handleCommand(ctx, msg, agent, nil)
 	if !handled {
 		t.Fatal("expected command to be handled")
 	}
-	if !strings.Contains(strings.ToLower(resp), "session not found") {
-		t.Errorf("expected 'session not found' in response, got: %q", resp)
+	if !strings.Contains(strings.ToLower(resp), "access denied") {
+		t.Errorf("expected 'access denied' in response, got: %q", resp)
+	}
+}
+
+func TestIsOwnedSession(t *testing.T) {
+	tests := []struct {
+		base, target string
+		want         bool
+	}{
+		{"agent:main:telegram:direct:123", "agent:main:telegram:direct:123", true},
+		{"agent:main:telegram:direct:123", "agent:main:telegram:direct:123:named:foo", true},
+		{"agent:main:telegram:direct:123", "agent:main:telegram:direct:456", false},
+		{"agent:main:telegram:direct:123", "agent:main:telegram:direct:1234", false},
+		{"agent:main:telegram:direct:123", "agent:main:telegram:direct:12", false},
+		{"agent:main:direct:user1", "agent:main:direct:user1:named:project", true},
+		{"agent:main:direct:user1", "agent:main:direct:user2", false},
+		{"", "agent:main:direct:user1", false},
+	}
+	for _, tt := range tests {
+		if got := isOwnedSession(tt.base, tt.target); got != tt.want {
+			t.Errorf("isOwnedSession(%q, %q) = %v, want %v", tt.base, tt.target, got, tt.want)
+		}
 	}
 }
 

@@ -2071,6 +2071,13 @@ func mapCommandError(result commands.ExecuteResult) string {
 	return fmt.Sprintf("Failed to execute /%s: %v", result.Command, result.Err)
 }
 
+// isOwnedSession reports whether targetKey belongs to the same user
+// identified by baseKey. A target key is owned if it equals the base key
+// or extends it with a ":" separator (e.g., a named sub-session).
+func isOwnedSession(baseKey, targetKey string) bool {
+	return targetKey == baseKey || strings.HasPrefix(targetKey, baseKey+":")
+}
+
 func (al *AgentLoop) buildSessionOps(agent *AgentInstance, opts *processOptions) *commands.SessionOps {
 	if agent.Sessions == nil {
 		return nil
@@ -2087,7 +2094,14 @@ func (al *AgentLoop) buildSessionOps(agent *AgentInstance, opts *processOptions)
 			return "", false
 		},
 		ListByPeer: func(peerID string) []commands.SessionInfo {
-			sessions := agent.Sessions.ListByPeer(peerID)
+			baseKey := ""
+			if opts != nil {
+				baseKey = opts.SessionKey
+			}
+			if baseKey == "" {
+				return nil
+			}
+			sessions := agent.Sessions.ListByPrefix(baseKey)
 			infos := make([]commands.SessionInfo, len(sessions))
 			for i, s := range sessions {
 				infos[i] = commands.SessionInfo{Key: s.Key, Updated: s.Updated}
@@ -2107,6 +2121,13 @@ func (al *AgentLoop) buildSessionOps(agent *AgentInstance, opts *processOptions)
 			return newKey, nil
 		},
 		Resume: func(senderID, key string) error {
+			baseKey := ""
+			if opts != nil {
+				baseKey = opts.SessionKey
+			}
+			if baseKey == "" || !isOwnedSession(baseKey, key) {
+				return fmt.Errorf("access denied: session %s does not belong to you", key)
+			}
 			history := agent.Sessions.GetHistory(key)
 			summary := agent.Sessions.GetSummary(key)
 			if len(history) == 0 && summary == "" {
@@ -2115,6 +2136,13 @@ func (al *AgentLoop) buildSessionOps(agent *AgentInstance, opts *processOptions)
 			return al.state.SetSessionOverride(senderID, key)
 		},
 		Delete: func(senderID, key string) (bool, error) {
+			baseKey := ""
+			if opts != nil {
+				baseKey = opts.SessionKey
+			}
+			if baseKey == "" || !isOwnedSession(baseKey, key) {
+				return false, fmt.Errorf("access denied: session %s does not belong to you", key)
+			}
 			activeKey, _ := al.state.GetSessionOverride(senderID), false
 			wasActive := key == activeKey
 			if !wasActive && opts != nil {

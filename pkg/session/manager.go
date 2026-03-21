@@ -299,6 +299,22 @@ func (sm *SessionManager) ListByPeer(peerID string) []*Session {
 	return result
 }
 
+// ListByPrefix returns sessions whose key equals prefix or starts with prefix+":".
+func (sm *SessionManager) ListByPrefix(prefix string) []*Session {
+	sm.mu.RLock()
+	result := make([]*Session, 0)
+	for key, s := range sm.sessions {
+		if key == prefix || strings.HasPrefix(key, prefix+":") {
+			result = append(result, s)
+		}
+	}
+	sm.mu.RUnlock()
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Updated.After(result[j].Updated)
+	})
+	return result
+}
+
 // Delete removes a session from the in-memory map and deletes the JSON file from disk.
 func (sm *SessionManager) Delete(key string) error {
 	sm.mu.Lock()

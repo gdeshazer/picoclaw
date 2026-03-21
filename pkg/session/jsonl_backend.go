@@ -86,6 +86,11 @@ func (b *JSONLBackend) ListByPeer(peerID string) []*Session {
 	return nil
 }
 
+func (b *JSONLBackend) ListByPrefix(prefix string) []*Session {
+	// JSONL backend does not maintain a session index; return empty.
+	return nil
+}
+
 func (b *JSONLBackend) Delete(key string) error {
 	// Clear the session data by setting empty history and summary.
 	b.SetHistory(key, []providers.Message{})

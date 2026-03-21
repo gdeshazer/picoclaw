@@ -196,3 +196,36 @@ func TestDelete_NoStorage(t *testing.T) {
 		t.Errorf("Delete with no storage returned error: %v", err)
 	}
 }
+
+func TestListByPrefix(t *testing.T) {
+	sm := NewSessionManager("")
+
+	sm.GetOrCreate("agent:main:telegram:direct:123456")
+	sm.GetOrCreate("agent:main:telegram:direct:123456:named:project-a")
+	sm.GetOrCreate("agent:main:telegram:direct:789000")
+	sm.GetOrCreate("agent:main:telegram:direct:1234")
+
+	// Exact prefix + sub-sessions should match.
+	results := sm.ListByPrefix("agent:main:telegram:direct:123456")
+	if len(results) != 2 {
+		t.Fatalf("expected 2 sessions for prefix 123456, got %d", len(results))
+	}
+
+	// Different user should match only their own.
+	results2 := sm.ListByPrefix("agent:main:telegram:direct:789000")
+	if len(results2) != 1 {
+		t.Fatalf("expected 1 session for prefix 789000, got %d", len(results2))
+	}
+
+	// Partial peer ID must NOT match (123 should not match 123456 or 1234).
+	results3 := sm.ListByPrefix("agent:main:telegram:direct:123")
+	if len(results3) != 0 {
+		t.Fatalf("expected 0 sessions for partial prefix 123, got %d", len(results3))
+	}
+
+	// Non-existent prefix returns empty.
+	results4 := sm.ListByPrefix("agent:main:telegram:direct:nonexistent")
+	if len(results4) != 0 {
+		t.Fatalf("expected 0 sessions for nonexistent prefix, got %d", len(results4))
+	}
+}
