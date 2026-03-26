@@ -14,7 +14,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -186,116 +185,52 @@ func (t *ExecTool) Name() string {
 }
 
 func (t *ExecTool) Description() string {
-	return `Execute shell commands. Use background=true for long-running commands (returns sessionId). Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 100MB.`
+	return `Execute shell commands. Use background=true for long-running commands (returns sessionId). Use pty=true for interactive commands (can combine with background=true). Use poll/read/write/send-keys/kill with sessionId to manage background sessions. Sessions auto-cleanup 30 minutes after process exits; use kill to terminate early. Output buffer limit: 1MB.`
 }
 
 func (t *ExecTool) Parameters() map[string]any {
 	return map[string]any{
-		"oneOf": []map[string]any{
-			{
-				"type": "object",
-				"properties": map[string]any{
-					"action":  map[string]any{"const": "run", "description": "Execute a shell command"},
-					"command": map[string]any{"type": "string", "description": "Shell command to execute"},
-					"background": map[string]any{
-						"type":        "string",
-						"description": "Run in background immediately",
-					},
-					"pty": map[string]any{
-						"type":        "string",
-						"description": "Run in a pseudo-terminal (PTY) when available",
-					},
-					"cwd": map[string]any{
-						"type":        "string",
-						"description": "Working directory for the command",
-					},
-					"timeout": map[string]any{
-						"type":        "integer",
-						"description": "Timeout in seconds (default: 0 = no timeout, kills process on expiry)",
-					},
-				},
-				"required": []string{"action", "command"},
+		"type": "object",
+		"properties": map[string]any{
+			"action": map[string]any{
+				"type":        "string",
+				"enum":        []string{"run", "list", "poll", "read", "write", "kill", "send-keys"},
+				"description": "Action: run (execute command), list (show sessions), poll (check status), read (get output), write (send input), kill (terminate), send-keys (send keys to PTY)",
 			},
-			{
-				"type": "object",
-				"properties": map[string]any{
-					"action": map[string]any{"const": "list", "description": "List all active sessions"},
-				},
-				"required": []string{"action"},
+			"command": map[string]any{
+				"type":        "string",
+				"description": "Shell command to execute (required for run)",
 			},
-			{
-				"type": "object",
-				"properties": map[string]any{
-					"action": map[string]any{
-						"const":       "poll",
-						"description": "Check session status. Returns: {sessionId, status: running|done, exitCode}. exitCode only meaningful when status=done",
-					},
-					"sessionId": map[string]any{
-						"type":        "string",
-						"description": "Session ID returned from background command",
-					},
-				},
-				"required": []string{"action", "sessionId"},
+			"sessionId": map[string]any{
+				"type":        "string",
+				"description": "Session ID (required for poll/read/write/kill/send-keys)",
 			},
-			{
-				"type": "object",
-				"properties": map[string]any{
-					"action": map[string]any{
-						"const":       "read",
-						"description": "Read output from session. Returns: {sessionId, output, status: running|done}",
-					},
-					"sessionId": map[string]any{
-						"type":        "string",
-						"description": "Session ID returned from background command",
-					},
-				},
-				"required": []string{"action", "sessionId"},
+			"keys": map[string]any{
+				"type":        "string",
+				"description": "Key names for send-keys: up, down, left, right, enter, tab, escape, backspace, ctrl-c, ctrl-d, home, end, pageup, pagedown, f1-f12",
 			},
-			{
-				"type": "object",
-				"properties": map[string]any{
-					"action": map[string]any{
-						"const":       "write",
-						"description": "Send input to session stdin (only when status=running)",
-					},
-					"sessionId": map[string]any{
-						"type":        "string",
-						"description": "Session ID returned from background command",
-					},
-					"data": map[string]any{"type": "string", "description": "Data to write to session stdin."},
-				},
-				"required": []string{"action", "sessionId", "data"},
+			"data": map[string]any{
+				"type":        "string",
+				"description": "Data to write to stdin (required for write)",
 			},
-			{
-				"type": "object",
-				"properties": map[string]any{
-					"action": map[string]any{"const": "kill", "description": "Terminate session"},
-					"sessionId": map[string]any{
-						"type":        "string",
-						"description": "Session ID returned from background command",
-					},
-				},
-				"required": []string{"action", "sessionId"},
+			"background": map[string]any{
+				"type":        "string",
+				"description": "Run in background immediately",
 			},
-			{
-				"type": "object",
-				"properties": map[string]any{
-					"action": map[string]any{
-						"const":       "send-keys",
-						"description": "Send special keys to PTY session. Keys: down/up/left/right/enter/escape/tab/backspace/ctrl-c/ctrl-d/ctrl-z. Multiple keys separated by comma",
-					},
-					"sessionId": map[string]any{
-						"type":        "string",
-						"description": "Session ID returned from background command",
-					},
-					"keys": map[string]any{
-						"type":        "string",
-						"description": "Comma-separated key names (optional spaces around comma). Valid keys: up, down, left, right, enter, tab, escape, backspace, ctrl-c, ctrl-d, home, end, pageup, pagedown, f1-f12.",
-					},
-				},
-				"required": []string{"action", "sessionId", "keys"},
+			"pty": map[string]any{
+				"type":        "string",
+				"description": "Run in a pseudo-terminal (PTY) when available",
+			},
+			"cwd": map[string]any{
+				"type":        "string",
+				"description": "Working directory for the command",
+			},
+			"timeout": map[string]any{
+				"type":        "integer",
+				"description": "Timeout in seconds (0 = no timeout)",
 			},
 		},
+		"required": []string{"action"},
 	}
 }
 
@@ -565,7 +500,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 
 		// For PTY, we need Setsid to create a new session.
 		// Note: Setsid and Setpgid conflict, so we must replace SysProcAttr entirely.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		setSysProcAttrForPty(cmd)
 
 		session.ptyMaster = ptmx
 	} else {

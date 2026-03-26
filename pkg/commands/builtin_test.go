@@ -57,6 +57,15 @@ func TestBuiltinHelpHandler_ReturnsFormattedMessage(t *testing.T) {
 	if !strings.Contains(reply, "/session - ") {
 		t.Fatalf("/help reply missing /session, got %q", reply)
 	}
+	if !strings.Contains(reply, "/list - ") {
+		t.Fatalf("/help reply missing /list, got %q", reply)
+	}
+	if !strings.Contains(reply, "  skills - ") {
+		t.Fatalf("/help reply missing indented 'skills' subcommand under /list, got %q", reply)
+	}
+	if !strings.Contains(reply, "/use") {
+		t.Fatalf("/help reply missing /use, got %q", reply)
+	}
 }
 
 func TestBuiltinShowChannel_PreservesUserVisibleBehavior(t *testing.T) {
@@ -382,5 +391,45 @@ func TestSessionCommand_UnavailableWithoutRuntime(t *testing.T) {
 	}
 	if reply != unavailableMsg {
 		t.Fatalf("expected unavailable message, got %q", reply)
+	}
+}
+
+func TestBuiltinListSkills_UsesRuntimeSkillNames(t *testing.T) {
+	rt := &Runtime{
+		ListSkillNames: func() []string {
+			return []string{"shell", "git"}
+		},
+	}
+	defs := BuiltinDefinitions()
+	ex := NewExecutor(NewRegistry(defs), rt)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Text: "/list skills",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("/list skills: outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if !strings.Contains(reply, "shell") || !strings.Contains(reply, "git") {
+		t.Fatalf("/list skills reply=%q, want installed skill names", reply)
+	}
+}
+
+func TestBuiltinUseCommand_PassthroughsToAgentLogic(t *testing.T) {
+	defs := BuiltinDefinitions()
+	ex := NewExecutor(NewRegistry(defs), nil)
+
+	res := ex.Execute(context.Background(), Request{
+		Text: "/use shell run ls",
+	})
+	if res.Outcome != OutcomePassthrough {
+		t.Fatalf("/use outcome=%v, want=%v", res.Outcome, OutcomePassthrough)
+	}
+	if res.Command != "use" {
+		t.Fatalf("/use command=%q, want=%q", res.Command, "use")
 	}
 }
