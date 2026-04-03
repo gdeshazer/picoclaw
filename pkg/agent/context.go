@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sipeed/picoclaw/pkg"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -59,14 +58,7 @@ func (cb *ContextBuilder) WithSplitOnMarker(enabled bool) *ContextBuilder {
 }
 
 func getGlobalConfigDir() string {
-	if home := os.Getenv(config.EnvHome); home != "" {
-		return home
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, pkg.DefaultPicoClawHome)
+	return config.GetHome()
 }
 
 func NewContextBuilder(workspace string) *ContextBuilder {
@@ -610,14 +602,16 @@ func (cb *ContextBuilder) BuildMessages(
 	// Add conversation history
 	messages = append(messages, history...)
 
-	// Add current user message
-	if strings.TrimSpace(currentMessage) != "" {
+	// Add current user message. Media-only turns must still be preserved so
+	// multimodal providers receive the uploaded image even when the user sends
+	// no accompanying text.
+	if strings.TrimSpace(currentMessage) != "" || len(media) > 0 {
 		msg := providers.Message{
 			Role:    "user",
 			Content: currentMessage,
 		}
 		if len(media) > 0 {
-			msg.Media = media
+			msg.Media = append([]string(nil), media...)
 		}
 		messages = append(messages, msg)
 	}
